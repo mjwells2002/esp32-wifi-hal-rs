@@ -535,7 +535,6 @@ impl<'res> WiFi<'res> {
         mut radio_clock: RADIO_CLK,
         _adc2: ADC2,
         dma_resources: &'res mut DMAResources<BUFFER_SIZE, BUFFER_COUNT>,
-        only_one_slot: bool,
     ) -> Self {
         trace!("Initializing WiFi.");
         Self::enable_wifi_power_domain();
@@ -553,7 +552,7 @@ impl<'res> WiFi<'res> {
             current_channel: AtomicU8::new(1),
             dma_list: blocking_mutex::Mutex::new(RefCell::new(DMAList::new(dma_resources))),
             sequence_number: AtomicU16::new(0),
-            tx_slot_queue: TxSlotQueue::new(if only_one_slot { 0..1 } else { 0..5 }),
+            tx_slot_queue: TxSlotQueue::new(0..5),
         };
         temp.set_channel(1).unwrap();
         // We disable all but one slot for now, due to an issue with duplicate frames.
