@@ -108,6 +108,7 @@ impl TxSlotStateSignal {
     pub fn reset(&self) {
         self.state.store(Self::PENDING, Ordering::Relaxed);
     }
+    #[inline(always)]
     pub fn signal(&self, slot_status: TxSlotStatus) {
         self.state.store(
             match slot_status {
@@ -669,6 +670,7 @@ impl<'res> WiFi<'res> {
             .config()
             .modify(|r, w| unsafe { w.bits(r.bits() | 0x00003000) });
         */
+        WIFI_TX_SLOTS[slot].reset();
         Self::enable_tx_slot(tx_slot_config);
         struct CancelOnDrop<'a> {
             tx_slot_config: &'a TX_SLOT_CONFIG,
@@ -676,7 +678,6 @@ impl<'res> WiFi<'res> {
         }
         impl CancelOnDrop<'_> {
             async fn wait_for_tx_complete(&self) -> WiFiResult<()> {
-                WIFI_TX_SLOTS[self.slot].reset();
                 // Wait for the hardware to confirm transmission.
                 let res = match WIFI_TX_SLOTS[self.slot].wait().await {
                     TxSlotStatus::Done => Ok(()),
