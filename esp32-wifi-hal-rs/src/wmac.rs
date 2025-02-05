@@ -699,6 +699,9 @@ impl<'res> WiFi<'res> {
             slot,
         };
         cancel_on_drop.wait_for_tx_complete().await?;
+        tx_slot_config.plcp0().write(|w| unsafe {
+            w.bits(0u32)
+        });
         match tx_slot_parameters.pmd().read().bits() >> 0xc {
             1 => Err(WiFiError::RtsTimeout),
             2 => Err(WiFiError::CtsTimeout),
