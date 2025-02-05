@@ -553,7 +553,7 @@ impl<'res> WiFi<'res> {
             current_channel: AtomicU8::new(1),
             dma_list: blocking_mutex::Mutex::new(RefCell::new(DMAList::new(dma_resources))),
             sequence_number: AtomicU16::new(0),
-            tx_slot_queue: TxSlotQueue::new(0..5),
+            tx_slot_queue: TxSlotQueue::new(0..1),
         };
         temp.set_channel(1).unwrap();
         // We disable all but one slot for now, due to an issue with duplicate frames.
