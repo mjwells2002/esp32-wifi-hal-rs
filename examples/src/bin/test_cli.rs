@@ -1,17 +1,17 @@
 #![no_std]
 #![no_main]
-use core::{fmt::Write, iter::repeat, marker::PhantomData, mem::MaybeUninit, str};
+use core::{fmt::Write, iter::repeat, marker::PhantomData, str};
 
 use alloc::{
     collections::btree_set::BTreeSet,
     string::{String, ToString},
 };
 use embassy_executor::Spawner;
-use embassy_futures::select::{select, Either};
-use embassy_time::{Duration, Instant, Ticker};
-use esp32_wifi_hal_rs::{
-    DMAResources, RxFilterBank, RxFilterInterface, TxParameters, WiFi, WiFiRate,
+use embassy_futures::{
+    select::{select, Either},
+    yield_now,
 };
+use embassy_time::{Duration, Instant, Ticker};
 use esp_backtrace as _;
 use esp_hal::{
     efuse::Efuse,
@@ -19,22 +19,23 @@ use esp_hal::{
     uart::{Config, Uart, UartRx},
     Async,
 };
+use esp_wifi_hal::{DMAResources, RxFilterBank, ScanningMode, TxParameters, WiFi, WiFiRate};
 use ieee80211::{
-    common::{CapabilitiesInformation, TU},
+    common::{CapabilitiesInformation, FrameType, ManagementFrameSubtype, TU},
     element_chain,
     elements::{
         tim::{StaticBitmap, TIMBitmap, TIMElement},
         DSSSParameterSetElement, SSIDElement,
     },
     mac_parser::{MACAddress, BROADCAST},
+    macro_bits::{bit, check_bit},
     match_frames,
     mgmt_frame::{body::BeaconBody, BeaconFrame, ManagementFrameHeader},
     scroll::Pwrite,
     supported_rates, GenericFrame,
 };
-use log::LevelFilter;
 extern crate alloc;
-use esp_alloc as _;
+use esp_alloc::{self as _, heap_allocator};
 
 macro_rules! mk_static {
     ($t:ty,$val:expr) => {{
@@ -44,22 +45,9 @@ macro_rules! mk_static {
         x
     }};
 }
-fn init_heap() {
-    const HEAP_SIZE: usize = 32 * 1024;
-    static mut HEAP: MaybeUninit<[u8; HEAP_SIZE]> = MaybeUninit::uninit();
-
-    unsafe {
-        esp_alloc::HEAP.add_region(esp_alloc::HeapRegion::new(
-            HEAP.as_mut_ptr() as *mut u8,
-            HEAP_SIZE,
-            esp_alloc::MemoryCapability::Internal.into(),
-        ));
-    }
-}
-
 const QUIT_SIGNAL: u8 = b'q';
 
-async fn wait_for_quit(uart_rx: &mut UartRx<'_, Async, impl esp_hal::uart::Instance>) {
+async fn wait_for_quit(uart_rx: &mut UartRx<'_, Async>) {
     loop {
         let mut buf = [0x0u8];
         let _ = uart_rx.read_async(buf.as_mut_slice()).await;
@@ -70,7 +58,7 @@ async fn wait_for_quit(uart_rx: &mut UartRx<'_, Async, impl esp_hal::uart::Insta
 }
 fn channel_cmd<'a>(
     wifi: &WiFi,
-    uart0_tx: &mut impl Write,
+    uart0_tx: &mut (impl core::fmt::Write + embedded_io_async::Write),
     mut args: impl Iterator<Item = &'a str> + 'a,
 ) {
     match args.next() {
@@ -108,7 +96,7 @@ fn channel_cmd<'a>(
 }
 async fn scan_on_channel(
     wifi: &WiFi<'_>,
-    uart0_tx: &mut impl Write,
+    uart0_tx: &mut (impl core::fmt::Write + embedded_io_async::Write),
     known_aps: &mut BTreeSet<String>,
 ) {
     loop {
@@ -133,16 +121,18 @@ async fn scan_on_channel(
 }
 async fn scan_command<'a>(
     wifi: &WiFi<'_>,
-    uart0_tx: &mut impl Write,
+    uart0_tx: &mut (impl core::fmt::Write + embedded_io_async::Write),
     mut args: impl Iterator<Item = &'a str> + 'a,
 ) {
-    wifi.set_filter_status(RxFilterBank::BSSID, RxFilterInterface::Zero, false);
-    wifi.set_filter_status(
-        RxFilterBank::ReceiverAddress,
-        RxFilterInterface::Zero,
-        false,
-    );
-    wifi.set_scanning_mode(RxFilterInterface::Zero, true);
+    let scanning_mode = match args.next() {
+        Some("beacons") => ScanningMode::BeaconsOnly,
+        Some("all") => ScanningMode::ManagementAndData,
+        _ => {
+            let _ = writeln!(uart0_tx, "Invalid scan mode, valid modes are beacons, all.");
+            return;
+        }
+    };
+    let _ = wifi.set_scanning_mode(0, scanning_mode);
     let mut known_aps = BTreeSet::new();
     let mode = args.next();
     match mode {
@@ -171,7 +161,7 @@ async fn scan_command<'a>(
 }
 async fn beacon_command<'a>(
     wifi: &WiFi<'_>,
-    uart0_tx: &mut impl Write,
+    uart0_tx: &mut (impl core::fmt::Write + embedded_io_async::Write),
     mut args: impl Iterator<Item = &'a str> + 'a,
 ) {
     let Some(ssid) = args.next() else {
@@ -242,16 +232,18 @@ async fn beacon_command<'a>(
             .transmit(
                 &mut buf[..written],
                 &TxParameters {
-                    rate: WiFiRate::PhyRate6M,
+                    rate: WiFiRate::PhyRateMCS0LGI,
                     override_seq_num: true,
                     ..Default::default()
                 },
+                None,
             )
-            .await;
+            .await
+            .unwrap();
         beacon_interval.next().await;
     }
 }
-fn dump_command(wifi: &WiFi, uart0_tx: &mut impl Write) {
+fn dump_command(wifi: &WiFi, uart0_tx: &mut (impl core::fmt::Write + embedded_io_async::Write)) {
     let _ = writeln!(uart0_tx, "Current channel: {}", wifi.get_channel());
 }
 fn parse_mac(mac_str: &str) -> Option<MACAddress> {
@@ -264,9 +256,25 @@ fn parse_mac(mac_str: &str) -> Option<MACAddress> {
     }
     Some(MACAddress::new(mac))
 }
+fn parse_interface(
+    interface: Option<&str>,
+    uart0_tx: &mut (impl core::fmt::Write + embedded_io_async::Write),
+) -> Option<usize> {
+    match interface.map(str::parse::<usize>) {
+        Some(Ok(interface)) if WiFi::is_valid_interface(interface).is_ok() => Some(interface),
+        _ => {
+            let _ = writeln!(
+                uart0_tx,
+                "Expected argument [interface], valid banks are 0-{}",
+                WiFi::INTERFACE_COUNT
+            );
+            None
+        }
+    }
+}
 fn filter_command<'a>(
     wifi: &WiFi,
-    uart0_tx: &mut impl Write,
+    uart0_tx: &mut (impl core::fmt::Write + embedded_io_async::Write),
     mut args: impl Iterator<Item = &'a str> + 'a,
 ) {
     let bank = match args.next() {
@@ -280,16 +288,8 @@ fn filter_command<'a>(
             return;
         }
     };
-    let interface = match args.next() {
-        Some("0") => RxFilterInterface::Zero,
-        Some("1") => RxFilterInterface::One,
-        _ => {
-            let _ = writeln!(
-                uart0_tx,
-                "Expected argument [interface], valid banks are 0, 1"
-            );
-            return;
-        }
+    let Some(interface) = parse_interface(args.next(), uart0_tx) else {
+        return;
     };
     match args.next() {
         Some("set") => {
@@ -301,13 +301,13 @@ fn filter_command<'a>(
                 let _ = writeln!(uart0_tx, "The provided MAC address was invalid.");
                 return;
             };
-            wifi.set_filter(bank, interface, *mac_address, *BROADCAST);
+            let _ = wifi.set_filter(bank, interface, *mac_address, *BROADCAST);
         }
         Some("enable") => {
-            wifi.set_filter_status(bank, interface, true);
+            let _ = wifi.set_filter_status(bank, interface, true);
         }
         Some("disable") => {
-            wifi.set_filter_status(bank, interface, false);
+            let _ = wifi.set_filter_status(bank, interface, false);
         }
         None => {
             let _ = writeln!(
@@ -323,64 +323,110 @@ fn filter_command<'a>(
         }
     }
 }
-async fn sniff_command(wifi: &WiFi<'_>, uart0_tx: &mut impl Write) {
+async fn sniff_command(
+    wifi: &WiFi<'_>,
+    uart0_tx: &mut (impl core::fmt::Write + embedded_io_async::Write),
+) {
+    wifi.clear_rx_queue();
     loop {
         let received = wifi.receive().await;
-        let _ = writeln!(uart0_tx, "{:x?}", received.header_buffer());
+        let mut interfaces = [0; 4];
+        let if_count = received
+            .interface_iterator()
+            .enumerate()
+            .map(|(i, interface)| interfaces[i] = interface)
+            .count();
 
         let buffer = received.mpdu_buffer();
+
         let Ok(generic_frame) = GenericFrame::new(buffer, false) else {
             continue;
         };
+        if generic_frame.frame_control_field().frame_type()
+            == FrameType::Management(ManagementFrameSubtype::Beacon)
+        {
+            // continue;
+        }
         let _ = write!(
             uart0_tx,
-            "Type: {:?} Address 1: {}",
+            "Type: {:?} RSSI: {}dBm Interfaces: {:?} Address 1: {}",
             generic_frame.frame_control_field().frame_type(),
+            received.rssi(),
+            &interfaces[..if_count],
             generic_frame.address_1()
         );
         if let Some(address_2) = generic_frame.address_2() {
             let _ = write!(uart0_tx, " Address 2: {address_2}");
         } else {
-            let _ = writeln!(uart0_tx);
+            let _ = writeln!(uart0_tx,);
         }
         if let Some(address_3) = generic_frame.address_3() {
             let _ = writeln!(uart0_tx, " Address 3: {address_3}");
         } else {
-            let _ = writeln!(uart0_tx);
+            let _ = writeln!(uart0_tx,);
         }
+        yield_now().await;
     }
 }
 fn scanning_mode_command<'a>(
     wifi: &WiFi,
-    uart0_tx: &mut impl Write,
+    uart0_tx: &mut (impl core::fmt::Write + embedded_io_async::Write),
     mut args: impl Iterator<Item = &'a str> + 'a,
 ) {
-    let interface = match args.next() {
-        Some("0") => RxFilterInterface::Zero,
-        Some("1") => RxFilterInterface::One,
+    let Some(interface) = parse_interface(args.next(), uart0_tx) else {
+        let _ = writeln!(uart0_tx, "Expected interface 0-3");
+        return;
+    };
+    let scanning_mode = match args.next() {
+        Some("management_and_data") => ScanningMode::ManagementAndData,
+        Some("beacons_only") => ScanningMode::BeaconsOnly,
+        Some("disabled") => ScanningMode::Disabled,
         _ => {
             let _ = writeln!(
                 uart0_tx,
-                "Expected argument [interface], valid banks are 0, 1"
+                "Expected argument [management_and_data|beacons_only|disabled]."
             );
             return;
         }
     };
-    match args.next() {
-        Some("enabled") => {
-            wifi.set_scanning_mode(interface, true);
-        }
-        Some("disabled") => {
-            wifi.set_scanning_mode(interface, false);
-        }
-        _ => {
-            let _ = writeln!(uart0_tx, "Expected argument [enabled|disable].");
-        }
+    let _ = wifi.set_scanning_mode(interface, scanning_mode);
+}
+async fn s_pol_command<'a>(
+    wifi: &WiFi<'_>,
+    uart0_tx: &mut (impl core::fmt::Write + embedded_io_async::Write),
+    mut args: impl Iterator<Item = &'a str> + 'a,
+) {
+    let Some(interface) = args.next() else {
+        let _ = writeln!(uart0_tx, "Missing interface parameter.");
+        return;
+    };
+    let Ok(interface) = interface.parse::<usize>() else {
+        let _ = writeln!(uart0_tx, "Couldn't parse interface.");
+        return;
+    };
+    if WiFi::is_valid_interface(interface).is_err() {
+        let _ = writeln!(uart0_tx, "Invalid interface.");
+        return;
     }
+    let Some(rx_policy) = args.next() else {
+        let _ = writeln!(uart0_tx, "Missing RX policy parameter.");
+        return;
+    };
+    let Ok(rx_policy) = u32::from_str_radix(rx_policy, 16) else {
+        let _ = writeln!(uart0_tx, "Couldn't parse RX policy.");
+        return;
+    };
+    let _ = writeln!(
+        uart0_tx,
+        "Previous RX policy: {:#08x}",
+        wifi.read_rx_policy_raw(interface).unwrap()
+    );
+    let _ = wifi.write_rx_policy_raw(interface, rx_policy);
+    let _ = writeln!(uart0_tx, "New RX policy: {rx_policy:#08x}");
 }
 async fn run_command<'a>(
     wifi: &WiFi<'_>,
-    uart0_tx: &mut impl Write,
+    uart0_tx: &mut (impl core::fmt::Write + embedded_io_async::Write),
     command: &str,
     args: impl Iterator<Item = &'a str> + 'a,
 ) {
@@ -394,12 +440,12 @@ async fn run_command<'a>(
                 If you want to terminate the currently executing command type 'q'.\n\n\
                 Available commands:\n\n\
                 channel [get|set] <CHANNEL_NUMBER> - Get or set the current channel.\n\
-                scan [hop] - Look for available access points.\n\
+                scan [all|beacons] [hop] - Look for available access points.\n\
                 beacon [SSID] <CHANNEL_NUMBER> - Transmit a beacon every 100 TUs.\n\
                 dump - Dump status information.\n\
                 filter [BSSID|RA] [0|1] [set|enable|disable] <FILTER_ADDRESS> - Set filter status.\n\
                 sniff - Logs frames with rough info.\n\
-                scanning_mode [enabled|disabled] - Set the scanning mode.
+                scanning_mode [interface] [management_and_data|beacons_only|disabled] - Set the scanning mode.
             "
             );
         }
@@ -420,28 +466,43 @@ async fn run_command<'a>(
         }
         "sniff" => sniff_command(wifi, uart0_tx).await,
         "scanning_mode" => scanning_mode_command(wifi, uart0_tx, args),
+        "s_pol" => s_pol_command(wifi, uart0_tx, args).await,
         _ => {
             let _ = writeln!(uart0_tx, "Unknown command {command}");
         }
     }
 }
-
+/*
+fn find_last_codepoint(bytes: &[u8]) -> usize {
+    for (i, byte) in bytes.iter().enumerate().rev() {
+        if !check_bit!(*byte, bit!(7)) {
+            return i;
+        }
+    }
+    0
+}
+*/
 #[esp_hal_embassy::main]
 async fn main(_spawner: Spawner) {
     let peripherals = esp_hal::init(esp_hal::Config::default());
-    init_heap();
-    esp_println::logger::init_logger(LevelFilter::Info);
+    heap_allocator!(32 * 1024);
+    esp_println::logger::init_logger_from_env();
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_hal_embassy::init(timg0.timer0);
 
+    #[cfg(feature = "esp32")]
+    let (rx_pin, tx_pin) = (peripherals.GPIO3, peripherals.GPIO1);
+    #[cfg(feature = "esp32s2")]
+    let (rx_pin, tx_pin) = (peripherals.GPIO44, peripherals.GPIO43);
+
     let (mut uart0_rx, mut uart0_tx) = Uart::new(
         peripherals.UART0,
-        Config::default().rx_fifo_full_threshold(64),
-        peripherals.GPIO3,
-        peripherals.GPIO1,
+        Config::default().with_rx_fifo_full_threshold(64),
     )
     .unwrap()
+    .with_rx(rx_pin)
+    .with_tx(tx_pin)
     .into_async()
     .split();
 
@@ -462,37 +523,46 @@ async fn main(_spawner: Spawner) {
             let Ok(received) = uart0_rx.read_async(&mut buf[current_offset..]).await else {
                 break;
             };
+            match &buf[current_offset..][..received] {
+                // Prevent the user from going up or down.
+                b"\x1b[A" | b"\x1b[B" => continue,
+                // Handle the user hitting enter.
+                b"\x0d" => {
+                    let _ = writeln!(uart0_tx,);
+                    break;
+                }
+                _ => {}
+            }
+            // Increase the offset.
             current_offset += received;
             if current_offset > buf.len() {
                 let _ = writeln!(&mut uart0_tx, "Command length exceed buffer limit.");
                 break;
             }
-            match buf[current_offset - 1] {
-                0xd => {
-                    let _ = writeln!(&mut uart0_tx);
-                    break;
+            // Handle backspaces.
+            if buf[current_offset - 1] == 0x08 {
+                if current_offset == 1 {
+                    current_offset = 0;
+                } else {
+                    current_offset -= received + 1;
+                    let _ = uart0_tx.write_async(b"\x08\x1bd \x08").await;
                 }
-                0x08 => {
-                    if current_offset == 1 {
-                        current_offset = 0;
-                    } else {
-                        current_offset -= received + 1;
-                        let _ = uart0_tx.write_async(b"\x08\x1bd \x08").await;
-                    }
-                    continue;
-                }
-                _ => {}
+                continue;
             }
+            // Return the new data to the console.
             let _ = uart0_tx
                 .write_async(&buf[(current_offset - received)..current_offset])
                 .await;
         }
-        let mut cmd = str::from_utf8(&buf[..current_offset])
+        let mut cmd_with_args = str::from_utf8(&buf[..current_offset])
             .unwrap()
             .split_whitespace();
+        let Some(cmd) = cmd_with_args.next() else {
+            continue;
+        };
         select(
             wait_for_quit(&mut uart0_rx),
-            run_command(&wifi, &mut uart0_tx, cmd.next().unwrap(), cmd),
+            run_command(&wifi, &mut uart0_tx, cmd, cmd_with_args),
         )
         .await;
     }

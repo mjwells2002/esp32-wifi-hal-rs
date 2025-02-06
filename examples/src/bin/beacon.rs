@@ -4,10 +4,10 @@ use core::marker::PhantomData;
 
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Instant, Ticker};
-use esp32_wifi_hal_rs::{DMAResources, TxParameters, WiFi, WiFiRate};
 use esp_backtrace as _;
 use esp_hal::{efuse::Efuse, timer::timg::TimerGroup};
 use esp_hal_embassy::main;
+use esp_wifi_hal::{DMAResources, TxParameters, WiFi, WiFiRate};
 use ieee80211::{
     common::{CapabilitiesInformation, SequenceControl, TU},
     element_chain,
@@ -20,7 +20,6 @@ use ieee80211::{
     scroll::Pwrite,
     ssid, supported_rates,
 };
-use log::LevelFilter;
 
 macro_rules! mk_static {
     ($t:ty,$val:expr) => {{
@@ -36,7 +35,7 @@ const SSID: &str = "The cake is a lie.";
 #[main]
 async fn main(_spawner: Spawner) {
     let peripherals = esp_hal::init(esp_hal::Config::default());
-    esp_println::logger::init_logger(LevelFilter::Debug);
+    esp_println::logger::init_logger_from_env();
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_hal_embassy::init(timg0.timer0);
@@ -92,13 +91,15 @@ async fn main(_spawner: Spawner) {
     };
     let written = buffer.pwrite(frame, 0).unwrap();
     loop {
+        log::info!("Boop.");
         wifi.transmit(
             &mut buffer[..written],
             &TxParameters {
-                rate: WiFiRate::PhyRate1ML,
+                rate: WiFiRate::PhyRateMCS0LGI,
                 override_seq_num: true,
                 ..Default::default()
             },
+            None,
         )
         .await
         .unwrap();

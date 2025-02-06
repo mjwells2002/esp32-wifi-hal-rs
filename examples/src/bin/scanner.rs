@@ -6,18 +6,19 @@ extern crate alloc;
 use core::{iter::repeat, mem::MaybeUninit};
 
 use alloc::{
+    boxed::Box,
     collections::btree_set::BTreeSet,
     string::{String, ToString},
 };
 use embassy_executor::Spawner;
 use embassy_futures::select::{select, Either};
 use embassy_time::{Duration, Ticker};
-use esp32_wifi_hal_rs::{DMAResources, WiFi};
-use esp_alloc as _;
+use esp_alloc::{self as _, heap_allocator};
 use esp_backtrace as _;
 use esp_hal::timer::timg::TimerGroup;
+use esp_wifi_hal::{DMAResources, ScanningMode, WiFi};
 use ieee80211::{match_frames, mgmt_frame::BeaconFrame, GenericFrame};
-use log::{info, LevelFilter};
+use log::info;
 macro_rules! mk_static {
     ($t:ty,$val:expr) => {{
         static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
@@ -26,20 +27,6 @@ macro_rules! mk_static {
         x
     }};
 }
-
-fn init_heap() {
-    const HEAP_SIZE: usize = 32 * 1024;
-    static mut HEAP: MaybeUninit<[u8; HEAP_SIZE]> = MaybeUninit::uninit();
-
-    unsafe {
-        esp_alloc::HEAP.add_region(esp_alloc::HeapRegion::new(
-            HEAP.as_mut_ptr() as *mut u8,
-            HEAP_SIZE,
-            esp_alloc::MemoryCapability::Internal.into(),
-        ));
-    }
-}
-
 async fn scan_on_channel(wifi: &mut WiFi<'_>, known_ssids: &mut BTreeSet<String>) {
     loop {
         let received = wifi.receive().await;
@@ -66,19 +53,20 @@ async fn scan_on_channel(wifi: &mut WiFi<'_>, known_ssids: &mut BTreeSet<String>
 #[esp_hal_embassy::main]
 async fn main(_spawner: Spawner) {
     let peripherals = esp_hal::init(esp_hal::Config::default());
-    init_heap();
-    esp_println::logger::init_logger(LevelFilter::Trace);
+    heap_allocator!(64 * 1024);
+    esp_println::logger::init_logger_from_env();
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_hal_embassy::init(timg0.timer0);
 
-    let dma_resources = mk_static!(DMAResources<1500, 10>, DMAResources::new());
+    let mut dma_resources = Box::new(DMAResources::<1500, 10>::new());
     let mut wifi = WiFi::new(
         peripherals.WIFI,
         peripherals.RADIO_CLK,
         peripherals.ADC2,
-        dma_resources,
+        dma_resources.as_mut(),
     );
+    let _ = wifi.set_scanning_mode(0, ScanningMode::BeaconsOnly);
     let mut known_ssids = BTreeSet::new();
     let mut hop_set = repeat([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]).flatten();
     let mut hop_interval = Ticker::every(Duration::from_secs(1));

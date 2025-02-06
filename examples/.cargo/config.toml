@@ -1,15 +1,18 @@
-[target.xtensa-esp32-none-elf]
-runner = "espflash flash --monitor"
-
-
-[env]
-
-[build]
+[target.'cfg(any(target_arch = "riscv32", target_arch = "xtensa"))']
+runner    = "espflash flash --monitor"
 rustflags = [
-  "-C", "link-arg=-nostartfiles",
+  "-C", "link-arg=-Tlinkall.x",
+  "-C", "force-frame-pointers",
 ]
 
-target = "xtensa-esp32-none-elf"
+[build]
+target = [
+  "xtensa-esp32-none-elf", 
+  "xtensa-esp32s2-none-elf", 
+  "xtensa-esp32s3-none-elf", 
+  "riscv32imc-unknown-none-elf", 
+  "riscv32imac-unknown-none-elf"
+]
 
 [unstable]
 build-std = ["core", "alloc"]

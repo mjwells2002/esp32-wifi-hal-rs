@@ -6,10 +6,10 @@ use core::marker::PhantomData;
 
 use embassy_executor::Spawner;
 use embassy_time::{Instant, Timer};
-use esp32_wifi_hal_rs::{DMAResources, TxParameters, WiFi, WiFiRate};
 use esp_backtrace as _;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal_embassy::main;
+use esp_wifi_hal::{DMAResources, TxParameters, WiFi, WiFiRate};
 use ieee80211::{
     common::{CapabilitiesInformation, SequenceControl},
     element_chain,
@@ -94,6 +94,7 @@ async fn beacon_task(ssid: &'static str, id: u8, wifi: &'static WiFi<'static>) {
                     rate: WiFiRate::PhyRate6M,
                     ..Default::default()
                 },
+                None,
             )
             .await;
         Timer::after_millis(100).await;

@@ -1,14 +1,14 @@
-# esp32-wifi-hal-rs
+# esp-wifi-hal
 This repo contains an experimental port of esp32-open-mac to Rust, with embassy. It is not intended to replace the C version, but to explore, how this can be done in Rust idiomatically. We still rely on the proprietary blobs for initializing the RF frontend and some more minor initialization. 
 ## DISCLAIMER
 This is experimental software. USE AT YOUR OWN RISK! We'll not take any liability for damage to the hardware. We do not condone the use of this for malicious purposes.
 ## Usage
-The actual crate lives in `esp32-wifi-hal-rs/` and examples are in `examples/`.
+The actual crate lives in `esp-wifi-hal/` and examples are in `examples/`.
 The `critical_section` feature allows using the driver across cores. If it is disabled, no critical sections are used in the driver at all.
 
 For further information see the docs.
 ## Building
-To set up a development environment follow the guide at https://docs.esp-rs.org/book/installation/index.html. Since this only works on the ESP32 right now, only the Xtensa section is of interest.
+To set up a development environment follow the guide at https://docs.esp-rs.org/book/installation/index.html. Since this only works on the ESP32 and ESP32-S2 right now, only the Xtensa section is of interest.
 To try one of these examples:
 1. Clone the repo
 2. Connect the ESP32

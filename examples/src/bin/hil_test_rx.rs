@@ -4,10 +4,10 @@ use core::mem::MaybeUninit;
 
 use embassy_executor::Spawner;
 use embassy_time::Instant;
-use esp32_wifi_hal_rs::{DMAResources, RxFilterBank, RxFilterInterface, WiFi};
 use esp_backtrace as _;
 use esp_hal::{efuse::Efuse, timer::timg::TimerGroup};
 use esp_println::println;
+use esp_wifi_hal::{DMAResources, RxFilterBank, WiFi};
 use ieee80211::{common::TU, match_frames, mgmt_frame::BeaconFrame};
 use log::LevelFilter;
 
@@ -51,20 +51,20 @@ async fn main(_spawner: Spawner) {
         peripherals.ADC2,
         dma_resources,
     );
-    wifi.set_filter(
+    let _ = wifi.set_filter(
         RxFilterBank::ReceiverAddress,
-        RxFilterInterface::Zero,
+        0,
         Efuse::read_base_mac_address(),
         [0xff, 0xff, 0xff, 0xff, 0xff, 0xf0],
     );
-    wifi.set_filter(
+    let _ = wifi.set_filter(
         RxFilterBank::BSSID,
-        RxFilterInterface::One,
+        0,
         [0x08, 0x3a, 0xf2, 0xa8, 0xc9, 0xd8],
         [0xff; 6],
     );
 
-    wifi.set_filter_status(RxFilterBank::ReceiverAddress, RxFilterInterface::Zero, true);
+    let _ = wifi.set_filter_status(RxFilterBank::ReceiverAddress, 0, true);
     println!("HIL test RX active.");
     let mut last_beacon_received = Instant::now();
     loop {

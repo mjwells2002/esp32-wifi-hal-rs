@@ -4,9 +4,9 @@
 use core::marker::PhantomData;
 
 use embassy_executor::Spawner;
-use esp32_wifi_hal_rs::{DMAResources, TxErrorBehaviour, TxParameters, WiFi, WiFiRate};
 use esp_backtrace as _;
 use esp_hal::{efuse::Efuse, timer::timg::TimerGroup};
+use esp_wifi_hal::{DMAResources, TxErrorBehaviour, TxParameters, WiFi, WiFiRate};
 use ieee80211::{
     common::{CapabilitiesInformation, SequenceControl},
     element_chain,
@@ -95,13 +95,10 @@ async fn main(_spawner: Spawner) {
                 } else {
                     WiFiRate::PhyRate2ML
                 },
-                interface_zero: false,
-                interface_one: false,
-                wait_for_ack: false,
                 override_seq_num: true,
-                duration: 0,
-                tx_error_behaviour: TxErrorBehaviour::Drop,
+                ..Default::default()
             },
+            None,
         )
         .await
         .unwrap();

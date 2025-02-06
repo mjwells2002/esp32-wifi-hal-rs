@@ -4,7 +4,7 @@
 extern crate alloc;
 
 use embassy_executor::Spawner;
-use esp32_wifi_hal_rs::{DMAResources, RxFilterBank, RxFilterInterface, WiFi};
+use esp_wifi_hal::{DMAResources, RxFilterBank, WiFi};
 use esp_backtrace as _;
 use esp_hal::timer::timg::TimerGroup;
 use ieee80211::GenericFrame;
@@ -42,18 +42,14 @@ async fn main(_spawner: Spawner) {
         // [0xFC, 0xEC, 0xDA, 0x87, 0xD7, 0x30],
         [0x00; 6],
     );*/
-    wifi.set_filter_status(RxFilterBank::BSSID, RxFilterInterface::Zero, false);
+    wifi.set_filter_status(RxFilterBank::BSSID, 0, false);
     /* wifi.set_filter(
         RxFilterBank::ReceiverAddress,
         RxFilterInterface::Zero,
         [0x00; 6],
         [0x00; 6],
     );*/
-    wifi.set_filter_status(
-        RxFilterBank::ReceiverAddress,
-        RxFilterInterface::Zero,
-        false,
-    );
+    wifi.set_filter_status(RxFilterBank::ReceiverAddress, 0, false);
     // wifi.set_scanning_mode(RxFilterInterface::Zero, true);
     loop {
         let received = wifi.receive().await;

@@ -1,11 +1,15 @@
+use crate::{esp_pac::WIFI, DefaultRawMutex};
 use core::{
+    cell::RefCell,
     marker::{PhantomData, PhantomPinned},
+    mem::MaybeUninit,
     ptr::{addr_of_mut, null_mut, NonNull},
     slice,
 };
-use esp32::WIFI;
 
 use bitfield_struct::bitfield;
+use embassy_sync::blocking_mutex;
+use esp_wifi_sys::include::wifi_pkt_rx_ctrl_t;
 
 #[bitfield(u32)]
 pub struct DMAListHeader {
@@ -33,18 +37,20 @@ pub struct DMAListItem<Use> {
     _phantom: PhantomData<Use>,
     _phantom_pinned: PhantomPinned,
 }
-unsafe impl<Use> Sync for DMAListItem<Use> {}
 unsafe impl<Use> Send for DMAListItem<Use> {}
 impl DMAListItem<Rx> {
     /// Initialize a new [DMAListItem] for RX.
     ///
     /// This is handled by the [DMAList].
-    fn init_for_rx(&mut self, buffer: &mut [u8], next: Option<NonNull<Self>>) {
+    /// SAFETY:
+    /// This assumes, that the buffer is valid for the entire duration, that this DMA descriptor is
+    /// in use.
+    unsafe fn init_for_rx(&mut self, buffer: *mut [u8], next: Option<NonNull<Self>>) {
         let next = match next {
             Some(next) => next.as_ptr(),
             None => null_mut(),
         };
-        self.buffer = buffer as *const _ as *mut u8;
+        self.buffer = buffer as *mut u8;
         self.next = next;
         self.dma_list_header = DMAListHeader::new()
             .with_buffer_size(buffer.len() as u16)
@@ -57,7 +63,9 @@ impl DMAListItem<Tx> {
     /// Initialize a new [DMAListItem] for TX.
     ///
     /// This is handled by [WiFi](crate::WiFi).
-    pub fn new_for_tx(buffer: &[u8]) -> DMAListItem<Tx> {
+    /// SAFETY:
+    /// You must ensure, that the DMAListItem doens't outlive the buffer.
+    pub unsafe fn new_for_tx(buffer: *const [u8]) -> DMAListItem<Tx> {
         let mut temp = Self::UNINIT;
         temp.buffer = buffer as *const _ as *mut u8 as _;
         temp.next = null_mut();
@@ -102,30 +110,39 @@ pub type TxDMAListItem = DMAListItem<Tx>;
 pub struct DMAResources<const BUFFER_SIZE: usize, const BUFFER_COUNT: usize> {
     buffers: [[u8; BUFFER_SIZE]; BUFFER_COUNT],
     dma_list_items: [RxDMAListItem; BUFFER_COUNT],
+    dma_list: MaybeUninit<blocking_mutex::Mutex<DefaultRawMutex, RefCell<DMAList<'static>>>>,
 }
 impl<const BUFFER_SIZE: usize, const BUFFER_COUNT: usize> DMAResources<BUFFER_SIZE, BUFFER_COUNT> {
     pub const fn new() -> Self {
         Self {
             buffers: [[0u8; BUFFER_SIZE]; BUFFER_COUNT],
             dma_list_items: [RxDMAListItem::UNINIT; BUFFER_COUNT],
+            dma_list: MaybeUninit::uninit(),
         }
     }
     /// Initialize the DMA resources.
     ///
     /// SAFETY:
     /// You must ensure, that this is only used as long as the DMA list lives!
-    unsafe fn init(&mut self) -> (NonNull<RxDMAListItem>, NonNull<RxDMAListItem>) {
+    pub(crate) unsafe fn init(
+        &mut self,
+    ) -> &blocking_mutex::Mutex<DefaultRawMutex, RefCell<DMAList<'static>>> {
         for (i, dma_list_item) in self.dma_list_items.iter_mut().enumerate() {
-            dma_list_item.init_for_rx(&mut self.buffers[i], None);
+            unsafe {
+                dma_list_item.init_for_rx(&mut self.buffers[i], None);
+            }
         }
         for i in 0..(BUFFER_COUNT - 1) {
             let next = addr_of_mut!(self.dma_list_items[i + 1]);
             self.dma_list_items[i].set_next(Some(next));
         }
-        (
+        let rx_chain_ptrs = (
             NonNull::new(addr_of_mut!(self.dma_list_items[0])).unwrap(),
             NonNull::new(addr_of_mut!(self.dma_list_items[BUFFER_COUNT - 1])).unwrap(),
-        )
+        );
+        let dma_list: DMAList<'static> = DMAList::new::<BUFFER_SIZE, BUFFER_COUNT>(rx_chain_ptrs);
+        self.dma_list = MaybeUninit::new(blocking_mutex::Mutex::new(RefCell::new(dma_list)));
+        unsafe { self.dma_list.assume_init_ref() }
     }
 }
 impl<const BUFFER_SIZE: usize, const BUFFER_COUNT: usize> Default
@@ -136,11 +153,11 @@ impl<const BUFFER_SIZE: usize, const BUFFER_COUNT: usize> Default
     }
 }
 
-pub struct DMAList<'a> {
+pub struct DMAList<'res> {
     rx_chain_ptrs: Option<(NonNull<RxDMAListItem>, NonNull<RxDMAListItem>)>,
-    _phantom: PhantomData<&'a ()>,
+    _phantom: PhantomData<&'res ()>,
 }
-impl<'a> DMAList<'a> {
+impl<'res> DMAList<'res> {
     /// Tell the hardware to reload the DMA list.
     ///
     /// This will update [MAC_NEXT_RX_DESCR] and [MAC_LAST_RX_DESCR].
@@ -153,27 +170,41 @@ impl<'a> DMAList<'a> {
         });
     }
     pub fn set_rx_base_addr(item: Option<NonNull<RxDMAListItem>>) {
-        unsafe { WIFI::steal() }.rx_descr_base().write(|w| unsafe {
-            w.bits(match item {
-                Some(dma_list_descriptor) => dma_list_descriptor.as_ptr(),
-                None => null_mut(),
-            } as _)
-        });
+        unsafe { WIFI::steal() }
+            .rx_dma_list()
+            .rx_descr_base()
+            .write(|w| unsafe {
+                w.bits(match item {
+                    Some(dma_list_descriptor) => dma_list_descriptor.as_ptr(),
+                    None => null_mut(),
+                } as _)
+            });
     }
     fn last_rx_descr_ptr() -> *mut RxDMAListItem {
-        unsafe { WIFI::steal() }.rx_descr_last().read().bits() as _
+        unsafe { WIFI::steal() }
+            .rx_dma_list()
+            .rx_descr_last()
+            .read()
+            .bits() as _
     }
     fn next_rx_descr_ptr() -> *mut RxDMAListItem {
-        unsafe { WIFI::steal() }.rx_descr_next().read().bits() as _
+        unsafe { WIFI::steal() }
+            .rx_dma_list()
+            .rx_descr_next()
+            .read()
+            .bits() as _
     }
     fn base_rx_descr_ptr() -> *mut RxDMAListItem {
-        unsafe { WIFI::steal() }.rx_descr_base().read().bits() as _
+        unsafe { WIFI::steal() }
+            .rx_dma_list()
+            .rx_descr_base()
+            .read()
+            .bits() as _
     }
     /// Instantiate a new DMAList.
-    pub fn new<const BUFFER_SIZE: usize, const BUFFER_COUNT: usize>(
-        resources: &'a mut DMAResources<BUFFER_SIZE, BUFFER_COUNT>,
+    fn new<const BUFFER_SIZE: usize, const BUFFER_COUNT: usize>(
+        rx_chain_ptrs: (NonNull<RxDMAListItem>, NonNull<RxDMAListItem>),
     ) -> Self {
-        let rx_chain_ptrs = unsafe { resources.init() };
         Self::set_rx_base_addr(Some(rx_chain_ptrs.0));
         debug!("Initialized DMA list.");
         Self::log_stats();
@@ -200,10 +231,12 @@ impl<'a> DMAList<'a> {
         Self::set_rx_base_addr(dma_list_descriptor)
     }
     /// Take the first [DMAListItem] out of the list.
-    pub fn take_first<'b>(&mut self) -> Option<&'b mut RxDMAListItem> {
-        let first = unsafe { self.rx_chain_ptrs.unwrap().0.as_mut() };
+    pub fn take_first(&mut self) -> Option<&'res mut RxDMAListItem> {
+        let first = unsafe { self.rx_chain_ptrs?.0.as_mut() };
         trace!("Taking buffer: {:x} from DMA list.", first as *mut _ as u32);
-        if first.dma_list_header.has_data() {
+        if first.dma_list_header.has_data()
+            && first.dma_list_header.buffer_length() as usize >= size_of::<wifi_pkt_rx_ctrl_t>()
+        {
             let next = first.next();
             if next.is_none() {
                 trace!("Next was none.");
@@ -213,6 +246,23 @@ impl<'a> DMAList<'a> {
         } else {
             None
         }
+    }
+    pub fn clear(&mut self) {
+        let Some(mut current) = self
+            .rx_chain_ptrs
+            .map(|mut ptrs| unsafe { ptrs.0.as_mut() })
+        else {
+            return;
+        };
+        while current.dma_list_header.has_data() {
+            current.dma_list_header.set_has_data(false);
+            let Some(mut next) = current.next() else {
+                break;
+            };
+            current = unsafe { next.as_mut() };
+        }
+        self.set_rx_chain_begin(self.rx_chain_ptrs.map(|ptrs| ptrs.0));
+        Self::reload_rx_descriptors();
     }
     /// Returns a [DMAListItem] to the end of the list.
     pub fn recycle(&mut self, dma_list_descriptor: &mut RxDMAListItem) {
@@ -249,5 +299,4 @@ impl<'a> DMAList<'a> {
         debug!("DMA list: Next: {rx_next:x} Last: {rx_last:x}");
     }
 }
-unsafe impl Sync for DMAList<'_> {}
 unsafe impl Send for DMAList<'_> {}

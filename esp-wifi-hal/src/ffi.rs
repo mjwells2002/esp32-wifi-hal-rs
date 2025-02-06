@@ -1,6 +1,16 @@
 // These implementations are taken from esp-wifi.
 
-use esp_hal::{macros::ram, rtc_cntl::RtcClock};
+use esp_hal::{ram, rtc_cntl::RtcClock};
+
+#[cfg(osi_funcs_required)]
+#[ram]
+extern "C" fn empty() {}
+
+#[cfg(osi_funcs_required)]
+#[allow(non_upper_case_globals)]
+#[no_mangle]
+#[ram]
+static g_osi_funcs_p: &[extern "C" fn(); 0x6a] = &[empty; 0x6a];
 
 #[ram]
 #[no_mangle]
@@ -8,6 +18,7 @@ unsafe extern "C" fn esp_dport_access_reg_read(reg: u32) -> u32 {
     (reg as *mut u32).read_volatile()
 }
 
+#[cfg(target_arch = "xtensa")]
 #[ram]
 #[no_mangle]
 unsafe extern "C" fn phy_enter_critical() -> u32 {
@@ -27,6 +38,7 @@ unsafe extern "C" fn phy_enter_critical() -> u32 {
 ///   None
 ///
 /// *************************************************************************
+#[cfg(target_arch = "xtensa")]
 #[ram]
 #[no_mangle]
 unsafe extern "C" fn phy_exit_critical(level: u32) {
@@ -42,12 +54,4 @@ unsafe extern "C" fn rtc_get_xtal() -> u32 {
 
     let xtal = RtcClock::xtal_freq();
     xtal.mhz()
-}
-
-extern "C" {
-    pub fn chip_v7_set_chan_nomac(channel: u8, idk: u8);
-    pub fn disable_wifi_agc();
-    pub fn enable_wifi_agc();
-    pub fn hal_init();
-    pub fn tx_pwctrl_background(_: u8, _: u8);
 }
