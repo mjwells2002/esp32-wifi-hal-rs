@@ -356,7 +356,7 @@ pub struct WiFi<'res> {
     tx_slot_queue: TxSlotQueue,
 }
 impl<'res> WiFi<'res> {
-    #[cfg(any(feature = "esp32", feature = "esp32s2", feature = "esp32c3"))]
+    #[cfg(any(feature = "esp32", feature = "esp32s2"))]
     pub const INTERFACE_COUNT: usize = 4;
     /// Returns the name of a radio peripheral.
     fn radio_peripheral_name(radio_peripheral: &RadioPeripherals) -> &'static str {

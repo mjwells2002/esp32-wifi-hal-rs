@@ -6,15 +6,12 @@ const OSI_FUNCS_REQUIRED: &str = "osi_funcs_required";
 
 const ESP32_META: &[&str] = &[];
 const ESP32S2_META: &[&str] = &[PWR_INTERRUPT_PRESENT, OSI_FUNCS_REQUIRED];
-const ESP32C3_META: &[&str] = &[PWR_INTERRUPT_PRESENT, OSI_FUNCS_REQUIRED];
 
 fn main() {
     let meta = if cfg!(feature = "esp32") {
         ESP32_META
     } else if cfg!(feature = "esp32s2") {
         ESP32S2_META
-    } else if cfg!(feature = "esp32c3") {
-        ESP32C3_META
     } else {
         panic!("You must select exactly one chip.");
     };

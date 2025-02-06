@@ -59,8 +59,6 @@ mod wmac;
 
 #[cfg(feature = "esp32")]
 use esp32 as esp_pac;
-#[cfg(feature = "esp32c3")]
-use esp32c3 as esp_pac;
 #[cfg(feature = "esp32s2")]
 use esp32s2 as esp_pac;
 

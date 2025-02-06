@@ -55,3 +55,11 @@ unsafe extern "C" fn rtc_get_xtal() -> u32 {
     let xtal = RtcClock::xtal_freq();
     xtal.mhz()
 }
+
+extern "C" {
+    pub fn chip_v7_set_chan(channel: u8, idk: u8);
+    pub fn hal_init();
+    pub fn tx_pwctrl_background(_: u8, _: u8);
+    pub fn enable_wifi_agc();
+    pub fn disable_wifi_agc();
+}

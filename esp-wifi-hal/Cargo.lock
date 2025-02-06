@@ -442,7 +442,6 @@ dependencies = [
  "esp-riscv-rt",
  "esp-synopsys-usb-otg",
  "esp32",
- "esp32c3",
  "esp32s2",
  "fugit",
  "instability",
@@ -561,7 +560,6 @@ version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61655d48e45039dfac5ae769581fb50ea7f61dea3227b4b744a1a900d03fbbd4"
 dependencies = [
- "critical-section",
  "vcell",
 ]
 
