@@ -296,7 +296,7 @@ impl<'res> DMAList<'res> {
             Self::next_rx_descr_ptr() as u32,
             Self::last_rx_descr_ptr() as u32,
         );
-        debug!("DMA list: Next: {rx_next:x} Last: {rx_last:x}");
+        trace!("DMA list: Next: {rx_next:x} Last: {rx_last:x}");
     }
 }
 unsafe impl Send for DMAList<'_> {}

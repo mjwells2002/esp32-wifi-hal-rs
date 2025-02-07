@@ -522,7 +522,6 @@ impl<'res> WiFi<'res> {
     /// Receive a frame.
     pub async fn receive(&self) -> BorrowedBuffer<'res> {
         let dma_list_item;
-        DMAList::log_stats();
 
         // Sometimes the DMA list descriptors don't contain any data, even though the hardware indicated reception.
         // We loop until we get something.
